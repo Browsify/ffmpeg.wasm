@@ -1,4 +1,6 @@
 const { defaultArgs, baseOptions } = require('./config');
+const { setLogging, setCustomLogger, log } = require('./utils/log');
+const parseProgress = require('./utils/parseProgress');
 const parseArgs = require('./utils/parseArgs');
 const { defaultOptions, getCreateFFmpegCore } = require('./node');
 const { version } = require('../package.json');
@@ -7,7 +9,7 @@ const NO_LOAD = Error('ffmpeg.wasm is not ready, make sure you have completed lo
 
 module.exports = (_options = {}) => {
   const {
-    log: optLog,
+    log: logging,
     logger,
     progress: optProgress,
     ...options
@@ -19,68 +21,13 @@ module.exports = (_options = {}) => {
   let Core = null;
   let ffmpeg = null;
   let runResolve = null;
-  let runReject = null;
   let running = false;
-  let customLogger = () => {};
-  let logging = optLog;
   let progress = optProgress;
-  let duration = 0;
-  let frames = 0;
-  let readFrames = false;
-  let ratio = 0;
-
   const detectCompletion = (message) => {
     if (message === 'FFMPEG_END' && runResolve !== null) {
       runResolve();
       runResolve = null;
-      runReject = null;
       running = false;
-    }
-  };
-  const log = (type, message) => {
-    customLogger({ type, message });
-    if (logging) {
-      console.log(`[${type}] ${message}`);
-    }
-  };
-  const ts2sec = (ts) => {
-    const [h, m, s] = ts.split(':');
-    return (parseFloat(h) * 60 * 60) + (parseFloat(m) * 60) + parseFloat(s);
-  };
-  const parseProgress = (message, prog) => {
-    if (typeof message === 'string') {
-      if (message.startsWith('  Duration')) {
-        const ts = message.split(', ')[0].split(': ')[1];
-        const d = ts2sec(ts);
-        prog({ duration: d, ratio });
-        if (duration === 0 || duration > d) {
-          duration = d;
-          readFrames = true;
-        }
-      } else if (readFrames && message.startsWith('    Stream')) {
-        const match = message.match(/([\d.]+) fps/);
-        if (match) {
-          const fps = parseFloat(match[1]);
-          frames = duration * fps;
-        } else {
-          frames = 0;
-        }
-        readFrames = false;
-      } else if (message.startsWith('frame') || message.startsWith('size')) {
-        const ts = message.split('time=')[1].split(' ')[0];
-        const t = ts2sec(ts);
-        const match = message.match(/frame=\s*(\d+)/);
-        if (frames && match) {
-          const f = parseFloat(match[1]);
-          ratio = Math.min(f / frames, 1);
-        } else {
-          ratio = t / duration;
-        }
-        prog({ ratio, time: t });
-      } else if (message.startsWith('video:')) {
-        prog({ ratio: 1 });
-        duration = 0;
-      }
     }
   };
   const parseMessage = ({ type, message }) => {
@@ -128,7 +75,7 @@ module.exports = (_options = {}) => {
          * as we are using blob URL instead of original URL to avoid cross origin issues.
          */
         locateFile: (path, prefix) => {
-          if (typeof window !== 'undefined' || typeof WorkerGlobalScope !== 'undefined') {
+          if (typeof window !== 'undefined') {
             if (typeof wasmPath !== 'undefined'
               && path.endsWith('ffmpeg-core.wasm')) {
               return wasmPath;
@@ -179,10 +126,9 @@ module.exports = (_options = {}) => {
       throw Error('ffmpeg.wasm can only run one command at a time');
     } else {
       running = true;
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve) => {
         const args = [...defaultArgs, ..._args].filter((s) => s.length !== 0);
         runResolve = resolve;
-        runReject = reject;
         ffmpeg(...parseArgs(Core, args));
       });
     }
@@ -231,24 +177,15 @@ module.exports = (_options = {}) => {
     if (Core === null) {
       throw NO_LOAD;
     } else {
-      // if there's any pending runs, reject them
-      if (runReject) {
-        runReject('ffmpeg has exited');
-      }
       running = false;
       try {
         Core.exit(1);
-      } catch (err) {
-        log(err.message);
-        if (runReject) {
-          runReject(err);
-        }
-      } finally {
-        Core = null;
-        ffmpeg = null;
-        runResolve = null;
-        runReject = null;
+      } catch(e) {
+        console.log('catch core exit error', e);
       }
+      Core = null;
+      ffmpeg = null;
+      runResolve = null;
     }
   };
 
@@ -257,12 +194,11 @@ module.exports = (_options = {}) => {
   };
 
   const setLogger = (_logger) => {
-    customLogger = _logger;
+    setCustomLogger(_logger);
   };
 
-  const setLogging = (_logging) => {
-    logging = _logging;
-  };
+  setLogging(logging);
+  setCustomLogger(logger);
 
   log('info', `use ffmpeg.wasm v${version}`);
 
